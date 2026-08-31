@@ -179,13 +179,13 @@ function volumeByPart(fromDate){
 const ui = {
   page:'log',
   date: today(),
-  part:'chest', partLocked:false,
-  mode:'w',                 // 'w' 筋トレ / 'c' 有酸素
-  min:'', km:'',
-  ex:'',
-  w:'',  r:'',
+  part:'chest',
+  mode:'w',               // 追加シート内の種別。'w' 筋トレ / 'c' 有酸素
+  ex:'',                  // 開いている種目ブロック
+  pending:null,           // 追加直後でまだ1セットも無い種目
+  sheetQ:'',
+  w:'', r:'', min:'', km:'',
   editing:null,           // 編集中セット id
-  pickOpen:false, pickQ:'', pickCur:0,
   calM: new Date().getMonth(), calY: new Date().getFullYear(), calSel:null,
   exQ:'',
 };
@@ -270,14 +270,14 @@ function tRender(){
   }
 
   const dock = $('#dock');
-  const need = (T.run || T.done) && (isNarrow() || ui.page !== 'log');
+  const need = (T.run || T.done) || (isNarrow() && ui.page === 'log');
   if (need){
     if (dock.hidden){ dock.hidden = false; dock.innerHTML = dockHTML(); }
     dock.dataset.s = tState();
     dock.style.setProperty('--p', p);
     $('#dRead', dock).textContent = mmss(T.left);
     $('#dLab', dock).textContent = T.done ? 'インターバル完了' : 'インターバル';
-    $('#dGo', dock).textContent = T.done ? '閉じる' : (T.run ? '一時停止' : '再開');
+    $('#dGo', dock).textContent = T.done ? '閉じる' : T.run ? '一時停止' : (T.left < T.total ? '再開' : '開始');
   } else if (!dock.hidden){
     dock.hidden = true; dock.innerHTML = '';
   }
@@ -292,7 +292,7 @@ function dockHTML(){
     <div class="dock-acts">
       <button class="btn-ghost" data-t="add" data-sec="30">+30秒</button>
       <button class="btn-solid" data-t="go" id="dGo">一時停止</button>
-      <button class="icon-btn" data-t="reset" title="リセット">×</button>
+      <button class="icon-btn dock-reset" data-t="reset" aria-label="リセット">×</button>
     </div>`;
 }
 
@@ -311,30 +311,59 @@ document.addEventListener('click', e => {
 
 /* =========================================================
    記録ページ
+   種目ごとのブロックにセット表を持ち、選択中のブロックだけが
+   「次のセット」の入力欄を開く。入口は下部の「種目を追加」ひとつ。
    ========================================================= */
+
+/* その日の種目（記録順）＋ まだ1セットも入れていない追加直後の種目 */
+function dayBlocks(){
+  const ss = setsOn(ui.date), order = [];
+  for (const s of ss) if (!order.includes(s.ex)) order.push(s.ex);
+  if (ui.pending && !order.includes(ui.pending.name)) order.push(ui.pending.name);
+  return order;
+}
+function blockInfo(name){
+  const rows = setsOn(ui.date).filter(s => s.ex === name).sort((a,b) => a.ts - b.ts);
+  if (rows.length) return { rows, cardio:isCardio(rows[0]), part:isCardio(rows[0]) ? 'cardio' : rows[0].part };
+  const p = ui.pending || {};
+  return { rows:[], cardio:!!p.cardio, part:p.cardio ? 'cardio' : (p.part || 'chest') };
+}
+/* 前回セッションの同じ番号のセット（Strong 系の「前回」列） */
+function prevSets(name){
+  const past = [...new Set(setsOfEx(name).filter(s => s.date < ui.date).map(s => s.date))].sort();
+  const d = past[past.length - 1];
+  return d ? { date:d, sets:setsOfEx(name).filter(s => s.date === d).sort((a,b) => a.ts - b.ts) } : null;
+}
+const setLabel = s => isCardio(s)
+  ? `${s.min}分${s.km ? ' ' + km2s(s.km) + 'km' : ''}`
+  : `${s.w ? w2s(s.w) + 'kg' : '自重'}×${s.r}`;
+
+/* 入力欄の初期値 */
 function suggest(){
+  const info = ui.ex ? blockInfo(ui.ex) : null;
+  const cardio = info ? info.cardio : ui.mode === 'c';
   const last = ui.ex ? lastSetOf(ui.ex, ui.date) : null;
-  if (ui.mode === 'c'){
-    if (last && isCardio(last)) return { min:String(last.min), km:last.km ? km2s(last.km) : '' };
-    const p = db.sets.filter(isCardio).sort((a,b) => b.ts - a.ts)[0];
-    return p ? { min:String(p.min), km:p.km ? km2s(p.km) : '' } : { min:'30', km:'' };
-  }
-  if (last && !isCardio(last)) return { w:w2s(last.w), r:String(last.r) };
-  const p = db.sets.filter(s => !isCardio(s) && s.part === ui.part).sort((a,b) => b.ts - a.ts)[0];
-  return p ? { w:w2s(p.w), r:String(p.r) } : { w:'20', r:'10' };
+  // 履歴のない種目に他種目の数値を入れると誤解を招くので空欄で出す
+  if (cardio) return (last && isCardio(last))
+    ? { min:String(last.min), km:last.km ? km2s(last.km) : '' }
+    : { min:'', km:'' };
+  return (last && !isCardio(last))
+    ? { w:w2s(last.w), r:String(last.r) }
+    : { w:'', r:'10' };
 }
 function syncInputs(){
   const s = suggest();
-  if (ui.mode === 'c'){ ui.min = s.min; ui.km = s.km; }
+  if (s.min !== undefined){ ui.min = s.min; ui.km = s.km; }
   else { ui.w = s.w; ui.r = s.r; }
 }
 
+/* ---------- ヘッダ ---------- */
 function dateHeadHTML(){
   const d = parseYmd(ui.date), n = diffDays(ui.date, today());
   const rel = n === 0 ? '<b>今日</b>' : n === -1 ? '昨日' : n === 1 ? '明日'
             : n < 0 ? `${-n}日前` : `${n}日後`;
   return `<div class="datenav">
-    <button class="icon-btn" data-l="day" data-n="-1" title="前の日">‹</button>
+    <button class="icon-btn" data-l="day" data-n="-1" aria-label="前の日">‹</button>
     <div class="date-block">
       <div class="date-line">
         <span class="d-num n">${d.getMonth()+1}<i>/</i>${d.getDate()}</span>
@@ -342,7 +371,7 @@ function dateHeadHTML(){
       </div>
       <div class="date-sub">${d.getFullYear()}年 · ${rel}</div>
     </div>
-    <button class="icon-btn" data-l="day" data-n="1" title="次の日">›</button>
+    <button class="icon-btn" data-l="day" data-n="1" aria-label="次の日">›</button>
     ${n !== 0 ? '<button class="btn-text" data-l="today" style="margin-left:8px">今日へ</button>' : ''}
   </div>`;
 }
@@ -352,11 +381,10 @@ function kpisHTML(){
   const w  = ss.filter(x => !isCardio(x)), c = ss.filter(isCardio);
   const kpi = (v, l, dim) => `<div class="kpi ${dim ? 'kpi--dim' : ''}"><span class="kpi-v n">${v}</span><span class="kpi-l">${l}</span></div>`;
   const out = [];
-
   if (w.length || !c.length){
     const v = w.reduce((a,s) => a + vol(s), 0), reps = w.reduce((a,s) => a + s.r, 0);
     out.push(kpi(w.length, 'セット', !w.length));
-    if (!c.length) out.push(kpi(reps, 'レップ', !reps));   // 有酸素もある日は詰める
+    if (!c.length) out.push(kpi(reps, 'レップ', !reps));
     out.push(kpi(`${nf(v)}<small>kg</small>`, '総挙上量', !v));
   }
   if (c.length){
@@ -365,236 +393,106 @@ function kpisHTML(){
     if (km) out.push(kpi(`${km2s(km)}<small>km</small>`, '距離'));
   }
   if (!w.length || !c.length) out.push(kpi(new Set(ss.map(s => s.ex)).size, '種目', true));
-
   return `<div class="kpis" id="logKpis">${out.join('')}</div>`;
 }
 
-function partsHTML(){
-  const ss = setsOn(ui.date);
-  const nc = ss.filter(isCardio).length;
-  const mode = `<div class="mode">
-      <button class="${ui.mode === 'w' ? 'is-on' : ''}" data-l="mode" data-m="w">筋トレ</button>
-      <button class="${ui.mode === 'c' ? 'is-on' : ''}" data-l="mode" data-m="c">有酸素${nc ? `<b>${nc}</b>` : ''}</button>
-    </div>`;
+/* ---------- 種目ブロック ---------- */
+function blockHTML(name){
+  const { rows, cardio, part } = blockInfo(name);
+  const on = ui.ex === name;
+  const prev = prevSets(name);
+  const pr = cardio ? null : prOf(name);
 
-  if (ui.mode === 'c') return `<div class="parts">${mode}</div>`;
+  const sum = cardio
+    ? (rows.length ? `${rows.length}本 · <b>${fmtDur(rows.reduce((a,s)=>a+s.min,0))}</b>` : '')
+    : (rows.length ? `${rows.length}セット${(() => { const v = rows.reduce((a,s)=>a+vol(s),0); return v ? ` · <b>${nf(v)}</b>kg` : ''; })()}` : '');
 
-  return `<div class="parts">${mode}<span class="mode-div"></span>` + PARTS.map(p => {
-    const c = ss.filter(s => !isCardio(s) && s.part === p.id).length;
-    return `<button class="part ${ui.part === p.id ? 'is-on' : ''}" data-l="part" data-p="${p.id}"
-      style="--pig:var(--p-${p.id})"><i></i>${p.ja}${c ? `<b>${c}</b>` : ''}</button>`;
-  }).join('') + `</div>`;
-}
-
-function recentsInner(){
-  const list = ui.mode === 'c'
-    ? allExercises().filter(e => e.cardio).map(e => e.name)
-    : exList(ui.part);
-  return list.slice(0, 5).map(n =>
-    `<button class="rec" data-l="pickex" data-v="${esc(n)}">${esc(n)}</button>`).join('');
-}
-function recentsHTML(){ return `<div class="recents" id="recents">${recentsInner()}</div>`; }
-
-function pickerHTML(){
-  return `<div class="pick" id="pick">
-    <div class="pick-field">
-      <input id="exIn" value="${esc(ui.ex)}" placeholder="種目名を入力" autocomplete="off" spellcheck="false">
-      <span class="pick-caret n">▼</span>
-    </div>
-    <div class="pick-menu" id="pickMenu" hidden></div>
-  </div>`;
-}
-
-function pickMenuHTML(){
-  const q = normName(ui.pickQ);
-  const all = allExercises();
-  const lc  = q.toLowerCase();
-
-  const pool = all.filter(e => !!e.cardio === (ui.mode === 'c'));
-  let head, items;
-  if (q){
-    items = pool.filter(e => e.name.toLowerCase().includes(lc));
-    head  = items.length ? '履歴から' : (ui.mode === 'c' ? '新しい種目' : '新しい種目');
-  } else if (ui.mode === 'c'){
-    items = pool;
-    head  = '有酸素の履歴';
-  } else {
-    items = pool.filter(e => e.part === ui.part);
-    head  = items.length ? `${PART_JA[ui.part]}の履歴` : '最近の種目';
-    if (!items.length) items = pool;
-  }
-  items = items.slice(0, 40);
-
-  const exists = all.some(e => e.name.toLowerCase() === lc);
-  const newRow = q && !exists ? 1 : 0;
-  ui.pickCur = clamp(ui.pickCur, 0, items.length + newRow - 1);
-
-  const rows = items.map((e, i) => {
-    const n = setsOfEx(e.name).length;
-    const hit = q ? e.name.indexOf(q) : -1;
-    const label = hit >= 0
-      ? esc(e.name.slice(0, hit)) + '<mark>' + esc(e.name.slice(hit, hit + q.length)) + '</mark>' + esc(e.name.slice(hit + q.length))
-      : esc(e.name);
-    return `<button class="pm-item ${i === ui.pickCur ? 'is-cur' : ''}" data-l="pickex" data-v="${esc(e.name)}"
-      style="--pig:var(--p-${e.part})"><i></i>${label}${n ? `<em>${n}</em>` : ''}</button>`;
-  });
-
-  if (newRow) rows.push(`<button class="pm-item pm-new ${items.length === ui.pickCur ? 'is-cur' : ''}"
-      data-l="newex" data-v="${esc(q)}">「${esc(q)}」を新しい種目として記録</button>`);
-
-  if (!rows.length) return `<div class="pm-sec">${
-    pool.length ? '該当する履歴がありません' : '種目名を入力してください'}</div>
-    <div class="pm-hint">${ui.mode === 'c'
-      ? 'ランニング、バイク、水泳など。記録した名前がここに残ります。'
-      : '記録した名前がここに残り、次からは履歴から選べます。'}</div>`;
-
-  return `<div class="pm-sec">${head}</div>` + rows.join('');
-}
-
-function prevHintHTML(){
-  if (ui.editing){
-    const s = db.sets.find(x => x.id === ui.editing);
-    return `<div class="prev-hint" id="prevHint"><span class="hint-ex" style="color:var(--accent)">
-      ${s ? esc(s.ex) : ''} を編集中</span><br><button data-l="cancelEdit">やめて新規入力に戻す</button></div>`;
-  }
-  if (!ui.ex) return `<div class="prev-hint" id="prevHint">種目名を入力すると<br>前回の記録が出ます</div>`;
-  const done = setsOn(ui.date).filter(x => x.ex === ui.ex);
-  const prev = lastSetOf(ui.ex, shiftDay(ui.date, -1));          // 前日以前の記録
-  const ref  = prev || done.slice().sort((a,b) => b.ts - a.ts)[0]; // なければ今日の直前セット
-  const d    = prev ? parseYmd(prev.date) : null;
-  const when = prev ? `${d.getMonth()+1}/${d.getDate()} は` : '直前は';
-  const unit = ui.mode === 'c' ? '本目' : 'セット目';
-  let body;
-  if (!ref) body = 'この種目は初めてです';
-  else if (isCardio(ref)) body = `${when} <b>${fmtDur(ref.min)}${ref.km ? ' ' + km2s(ref.km) + 'km' : ''}</b>
-      <button data-l="applyPrev" data-min="${ref.min}" data-km="${ref.km || ''}">入れる</button>`;
-  else body = `${when} <b>${ref.w ? w2s(ref.w)+'kg × '+ref.r : '自重 × '+ref.r}</b>
-      <button data-l="applyPrev" data-w="${ref.w}" data-r="${ref.r}">入れる</button>`;
-  return `<div class="prev-hint" id="prevHint">
-    <span class="hint-ex">${esc(ui.ex)}　<b>${done.length + 1}</b>${unit}</span><br>${body}</div>`;
-}
-
-function instHTML(){
-  if (ui.mode === 'c') return instCardioHTML();
-  return `<div class="inst ${ui.editing ? 'is-edit' : ''}" id="inst">
-    <div class="inst-col">
-      <div class="field-l">重量</div>
-      <div class="readout">
-        <button class="step" data-l="w" data-n="-${db.settings.wStep}">−</button>
-        <input class="num-in n" id="inW" inputmode="decimal" value="${esc(ui.w)}" aria-label="重量">
-        <span class="unit">kg</span>
-        <button class="step" data-l="w" data-n="${db.settings.wStep}">+</button>
-      </div>
-      <div class="quicks">
-        ${[2.5,5,10,20].map(v => `<button class="q" data-l="w" data-n="${v}">+${v}</button>`).join('')}
-      </div>
-    </div>
-    <div class="inst-sep"></div>
-    <div class="inst-col">
-      <div class="field-l">回数</div>
-      <div class="readout">
-        <button class="step" data-l="r" data-n="-1">−</button>
-        <input class="num-in n" id="inR" inputmode="numeric" value="${esc(ui.r)}" aria-label="回数">
-        <span class="unit">回</span>
-        <button class="step" data-l="r" data-n="1">+</button>
-      </div>
-      <div class="quicks">
-        ${[5,8,10,12,15].map(v => `<button class="q" data-l="rset" data-n="${v}">${v}</button>`).join('')}
-      </div>
-    </div>
-    <div class="inst-act">
-      ${prevHintHTML()}
-      <button class="btn-primary" id="btnLog" data-l="log">${ui.editing ? '更新する' : 'セットを記録'}<kbd>⏎</kbd></button>
-    </div>
-  </div>`;
-}
-
-function instCardioHTML(){
-  const p = (parseFloat(ui.km) > 0 && parseInt(ui.min,10) > 0) ? parseInt(ui.min,10) / parseFloat(ui.km) : 0;
-  return `<div class="inst is-cardio ${ui.editing ? 'is-edit' : ''}" id="inst">
-    <div class="inst-col">
-      <div class="field-l">時間</div>
-      <div class="readout">
-        <button class="step" data-l="min" data-n="-1">−</button>
-        <input class="num-in n" id="inMin" inputmode="numeric" value="${esc(ui.min)}" aria-label="時間（分）">
-        <span class="unit">分</span>
-        <button class="step" data-l="min" data-n="1">+</button>
-      </div>
-      <div class="quicks">
-        ${[5,10,15,30].map(v => `<button class="q" data-l="min" data-n="${v}">+${v}</button>`).join('')}
-      </div>
-    </div>
-    <div class="inst-sep"></div>
-    <div class="inst-col">
-      <div class="field-l">距離<span class="opt">任意</span></div>
-      <div class="readout">
-        <button class="step" data-l="km" data-n="-0.5">−</button>
-        <input class="num-in n" id="inKm" inputmode="decimal" value="${esc(ui.km)}" placeholder="—" aria-label="距離（km）">
-        <span class="unit">km</span>
-        <button class="step" data-l="km" data-n="0.5">+</button>
-      </div>
-      <div class="quicks">
-        ${[0.5,1,5,10].map(v => `<button class="q" data-l="km" data-n="${v}">+${v}</button>`).join('')}
-      </div>
-    </div>
-    <div class="inst-act">
-      ${prevHintHTML()}
-      <div class="inst-go">
-        <div class="pace ${p ? '' : 'is-off'}"><span class="micro">ペース</span>
-          <b class="n">${p ? fmtPace(p) : '—'}</b><i>/km</i></div>
-        <button class="btn-primary" id="btnLog" data-l="log">${ui.editing ? '更新する' : '記録する'}<kbd>⏎</kbd></button>
-      </div>
-    </div>
-  </div>`;
-}
-
-function ledgerHTML(){
-  const ss = setsOn(ui.date);
-  if (!ss.length) return `<div class="empty">
-      <h4>${diffDays(ui.date, today()) === 0 ? 'まだ今日の記録はありません' : 'この日の記録はありません'}</h4>
-      <p>筋トレは部位・重量・回数、有酸素は時間・距離で記録します。一度記録した種目名は履歴に残り、次からは入力欄の候補に出ます。</p>
-    </div>`;
-
-  const order = [];
-  for (const s of ss) if (!order.includes(s.ex)) order.push(s.ex);
-
-  return order.map(name => {
-    const rows = ss.filter(s => s.ex === name);
-    const cardio = isCardio(rows[0]);
-    const v = rows.reduce((a,s) => a + vol(s), 0);
-    const part = cardio ? 'cardio' : rows[0].part;
-    const pr = cardio ? null : prOf(name);
-    const meta = cardio
-      ? `${rows.length}本 · <b>${fmtDur(rows.reduce((a,s) => a + s.min, 0))}</b>${
-          rows.some(s => s.km) ? ` <b>${km2s(rows.reduce((a,s) => a + (s.km || 0), 0))}</b>km` : ''}`
-      : `${rows.length}セット${v ? ` · <b>${nf(v)}</b>kg` : ''}`;
-
-    return `<div class="lg-group" style="--pig:var(--p-${part})">
-      <div class="lg-head"><span class="pig"></span><h3>${esc(name)}</h3>
-        <span class="lg-meta">${meta}</span></div>
-      <ol>${rows.map((s, i) => {
-        const isPR = pr && pr.id === s.id && setsOfEx(name).filter(x => !isCardio(x)).length > 1;
-        const p = paceOf(s);
-        const cells = isCardio(s)
-          ? `<span class="lg-w n">${s.min}<i>分</i></span>
-             <span class="lg-x n">·</span>
-             <span class="lg-r n">${s.km ? km2s(s.km) + '<i>km</i>' : ''}</span>
-             <span class="lg-badge"></span>
-             <span class="lg-v n">${p ? fmtPace(p) + '<i>/km</i>' : '—'}</span>`
-          : `<span class="lg-w n">${s.w ? w2s(s.w) + '<i>kg</i>' : '自重'}</span>
-             <span class="lg-x n">×</span>
-             <span class="lg-r n">${s.r}</span>
-             <span class="lg-badge">${isPR ? '<em class="lg-pr">自己ベスト</em>' : ''}</span>
-             <span class="lg-v n">${s.w ? nf(vol(s)) + '<i>kg</i>' : '—'}</span>`;
-        return `<li class="lg-row" data-id="${s.id}">
-          <span class="lg-i">${i+1}</span>${cells}
-          <button class="icon-btn lg-menu" data-l="menu" data-id="${s.id}" style="font-size:15px" title="操作">⋯</button>
-        </li>`;
-      }).join('')}</ol>
-    </div>`;
+  const setRows = rows.map((s, i) => {
+    const p = prev && prev.sets[i];
+    const isPR = pr && pr.id === s.id && setsOfEx(name).filter(x => !isCardio(x)).length > 1;
+    const val = isCardio(s)
+      ? `${s.min}<i>分</i>${s.km ? ` <span class="s-dot">·</span> ${km2s(s.km)}<i>km</i>` : ''}${
+          paceOf(s) ? `<em>${fmtPace(paceOf(s))}/km</em>` : ''}`
+      : `${s.w ? w2s(s.w) + '<i>kg</i>' : '自重'} <span class="s-dot">×</span> ${s.r}${
+          isPR ? '<em class="s-pr">自己ベスト</em>' : ''}`;
+    return `<li class="srow" data-id="${s.id}">
+      <span class="s-i">${i+1}</span>
+      <span class="s-prev">${p ? esc(setLabel(p)) : ''}</span>
+      <span class="s-val n">${val}</span>
+      <button class="icon-btn s-menu" data-l="menu" data-id="${s.id}" aria-label="このセットの操作">⋯</button>
+    </li>`;
   }).join('');
+
+  return `<section class="blk ${on ? 'is-on' : ''}" style="--pig:var(--p-${part})" data-ex="${esc(name)}">
+    <button class="blk-h" data-l="focus" data-v="${esc(name)}">
+      <span class="pig"></span>
+      <h3>${esc(name)}</h3>
+      <span class="blk-tag">${PART_JA[part]}</span>
+      <span class="blk-sum">${sum}</span>
+    </button>
+    ${rows.length ? `<ol class="blk-sets">${setRows}</ol>` : ''}
+    ${on ? entryHTML(name, cardio, rows.length, prev)
+         : `<button class="blk-more" data-l="focus" data-v="${esc(name)}">＋ セットを追加</button>`}
+  </section>`;
 }
 
+/* ---------- 次のセットの入力 ---------- */
+function fieldHTML(key, label, note, value, unit, step, quicks, ph){
+  return `<div class="fld-wrap">
+    <div class="fld-l">${label}${note ? `<span class="opt">${note}</span>` : ''}</div>
+    <div class="fld">
+      <button class="fld-b" data-l="${key}" data-n="-${step}" aria-label="減らす">−</button>
+      <div class="fld-in">
+        <input class="n" id="in${key}" inputmode="${key === 'r' || key === 'min' ? 'numeric' : 'decimal'}"
+               value="${esc(value)}" ${ph ? `placeholder="${ph}"` : ''} aria-label="${label}">
+        <span>${unit}</span>
+      </div>
+      <button class="fld-b" data-l="${key}" data-n="${step}" aria-label="増やす">＋</button>
+    </div>
+    <div class="quicks">${quicks}</div>
+  </div>`;
+}
+
+function entryHTML(name, cardio, count, prev){
+  const editing = ui.editing && db.sets.find(x => x.id === ui.editing);
+  const nth = editing ? '' : `<b>${count + 1}</b>${cardio ? '本目' : 'セット目'}`;
+  const ref = prev && prev.sets[count];
+  const d = prev ? parseYmd(prev.date) : null;
+  const hint = editing
+    ? '<span class="ed">このセットを編集中</span>'
+    : ref ? `前回 ${d.getMonth()+1}/${d.getDate()} は <b>${esc(setLabel(ref))}</b>`
+    : prev ? `前回 ${d.getMonth()+1}/${d.getDate()} · ${prev.sets.length}${cardio ? '本' : 'セット'}`
+    : 'この種目は初めてです';
+
+  const fields = cardio
+    ? fieldHTML('min', '時間', '', ui.min, '分', 5,
+        [5,10,15,30].map(v => `<button class="q" data-l="min" data-n="${v}">+${v}</button>`).join(''), '—') +
+      fieldHTML('km', '距離', '任意', ui.km, 'km', 0.5,
+        [0.5,1,5].map(v => `<button class="q" data-l="km" data-n="${v}">+${v}</button>`).join(''), '—')
+    : fieldHTML('w', '重量', '', ui.w, 'kg', db.settings.wStep,
+        [2.5,5,10,20].map(v => `<button class="q" data-l="w" data-n="${v}">+${v}</button>`).join(''), '—') +
+      fieldHTML('r', '回数', '', ui.r, '回', 1,
+        [5,8,10,12,15].map(v => `<button class="q" data-l="rset" data-n="${v}">${v}</button>`).join(''));
+
+  const pace = cardio ? (() => {
+    const m = parseInt(ui.min,10), k = parseFloat(ui.km);
+    const p = (k > 0 && m > 0) ? m / k : 0;
+    return `<div class="pace ${p ? '' : 'is-off'}"><span class="micro">ペース</span><b class="n">${
+      p ? fmtPace(p) : '—'}</b><i>/km</i></div>`;
+  })() : '';
+
+  return `<div class="entry ${editing ? 'is-edit' : ''}" id="entry">
+    <div class="entry-top">${nth}<span class="entry-hint">${hint}</span>
+      ${editing ? '<button class="btn-text" data-l="cancelEdit">やめる</button>' : ''}</div>
+    <div class="entry-grid">
+      ${fields}
+      <div class="entry-go">${pace}
+        <button class="btn-rec" id="btnLog" data-l="log">${editing ? '更新' : '記録'}</button></div>
+    </div>
+  </div>`;
+}
+
+/* ---------- サイド ---------- */
 function sideTodayHTML(){
   const ss = setsOn(ui.date);
   if (!ss.length) return `<div class="side-empty">記録すると部位ごとの内訳が出ます。</div>`;
@@ -621,7 +519,7 @@ function prevSessionHTML(){
   const ss = setsOn(d);
   const order = []; for (const s of ss) if (!order.includes(s.ex)) order.push(s.ex);
   const dd = parseYmd(d), gap = diffDays(ui.date, d);
-  const parts = [...new Set(ss.map(s => s.part))];
+  const parts = [...new Set(ss.map(s => isCardio(s) ? 'cardio' : s.part))];
   return `<button class="prev-sess" data-l="jump" data-d="${d}" title="この日を開く">
     <div class="ps-top">
       <span class="ps-date n">${dd.getMonth()+1}<i>/</i>${dd.getDate()}</span>
@@ -652,16 +550,20 @@ function timerHTML(){
   </section>`;
 }
 
+/* ---------- ページ ---------- */
 function logHTML(){
+  const blocks = dayBlocks();
   return `<div class="wrap">
     <header class="log-top">${dateHeadHTML()}${kpisHTML()}</header>
     <div class="work">
       <div class="work-main">
-        ${partsHTML()}
-        ${pickerHTML()}
-        ${recentsHTML()}
-        ${instHTML()}
-        <div class="ledger" id="ledger">${ledgerHTML()}</div>
+        ${blocks.length
+          ? `<div class="sec-l">今日のメニュー</div><div class="blocks">${blocks.map(blockHTML).join('')}</div>`
+          : `<div class="empty">
+              <h4>${diffDays(ui.date, today()) === 0 ? 'まだ今日の記録はありません' : 'この日の記録はありません'}</h4>
+              <p>下のボタンから種目を選ぶと、その種目のセット表が開きます。重量と回数を入れて「記録」を押すだけです。</p>
+            </div>`}
+        <button class="add-ex" data-l="addex">＋ 種目を追加</button>
         <div class="note-row">
           <span class="micro-ja">メモ</span>
           <input id="noteIn" value="${esc(db.notes[ui.date] || '')}" placeholder="体調、フォーム、次回の狙いなど">
@@ -676,155 +578,226 @@ function logHTML(){
   </div>`;
 }
 
-function renderLog(){ $('#page-log').innerHTML = logHTML(); tRender(); }
+function renderLog(){
+  // 開いた直後に入力欄が見えるよう、その日の最後に触った種目を開いておく
+  if (!ui.ex && !ui.pending){
+    const ss = setsOn(ui.date);
+    if (ss.length){ ui.ex = ss.slice().sort((a,b) => b.ts - a.ts)[0].ex; syncInputs(); }
+  }
+  $('#page-log').innerHTML = logHTML();
+  tRender();
+}
 
+/* ブロック内だけを描き直す（入力欄の再生成を最小限に） */
 function refreshLog(){
+  const blocks = dayBlocks();
+  const box = $('.blocks');
+  if (!box || !blocks.length){ renderLog(); renderRail(); return; }
+  box.innerHTML = blocks.map(blockHTML).join('');
   $('#logKpis').outerHTML = kpisHTML();
-  $('.parts').outerHTML = partsHTML();
-  $('#ledger').innerHTML = ledgerHTML();
   $('#sideToday').innerHTML = sideTodayHTML();
   $('#sidePrev').innerHTML = prevSessionHTML();
-  $('#recents').innerHTML = recentsInner();
-  $('#prevHint').outerHTML = prevHintHTML();
-  $('#inst').classList.toggle('is-edit', !!ui.editing);
-  $('#btnLog').innerHTML = (ui.editing ? '更新する' : ui.mode === 'c' ? '記録する' : 'セットを記録') + '<kbd>⏎</kbd>';
   renderRail();
 }
 
 /* ---------- 入力ヘルパ ---------- */
-function setW(v){ ui.w = v; const el = $('#inW'); if (el && el.value !== v){ el.value = v; bump(el); } }
-function setR(v){ ui.r = v; const el = $('#inR'); if (el && el.value !== v){ el.value = v; bump(el); } }
-function setMin(v){ ui.min = v; const el = $('#inMin'); if (el && el.value !== v){ el.value = v; bump(el); } repaint(); }
-function setKm(v){ ui.km = v; const el = $('#inKm'); if (el && el.value !== v){ el.value = v; bump(el); } repaint(); }
-/* ペース表示だけを更新する */
-function repaint(){
+function bump(el){ el.classList.remove('is-bump'); void el.offsetWidth; el.classList.add('is-bump'); }
+function setVal(key, v){
+  ui[key] = v;
+  const el = $('#in' + key);
+  if (el && el.value !== v){ el.value = v; bump(el); }
+  if (key === 'min' || key === 'km') repaintPace();
+}
+function repaintPace(){
   const box = $('.pace'); if (!box) return;
   const m = parseInt(ui.min,10), k = parseFloat(ui.km);
   const p = (k > 0 && m > 0) ? m / k : 0;
   box.classList.toggle('is-off', !p);
   $('b', box).textContent = p ? fmtPace(p) : '—';
 }
-function bump(el){ el.classList.remove('is-bump'); void el.offsetWidth; el.classList.add('is-bump'); }
 
-function openPick(){
-  ui.pickOpen = true; ui.pickCur = 0;
-  const m = $('#pickMenu'); if (!m) return;
-  m.innerHTML = pickMenuHTML(); m.hidden = false;
+/* ---------- 種目を追加するシート ---------- */
+function sheetAddEx(){
+  ui.sheetQ = '';
+  openSheet(addExHTML(), 'sheet-add');
+  const i = $('#addQ'); if (i && !isNarrow()) i.focus();
 }
-function closePick(){ ui.pickOpen = false; const m = $('#pickMenu'); if (m) m.hidden = true; }
-function repick(){ const m = $('#pickMenu'); if (m && ui.pickOpen) m.innerHTML = pickMenuHTML(); }
-
-function chooseEx(name){
-  ui.ex = name; ui.pickQ = '';
-  // 履歴の部位を引き継ぐ。ただし自分で部位を押した直後は、その選択を尊重する（付け替えを可能にする）
-  if (!ui.partLocked){ const p = partOfEx(name); if (p) ui.part = p; }
-  const el = $('#exIn'); if (el) el.value = name;
-  closePick(); syncInputs();
-  if (ui.mode === 'c'){ $('#inMin').value = ui.min; $('#inKm').value = ui.km; }
-  else { $('#inW').value = ui.w; $('#inR').value = ui.r; }
-  refreshLog();
-  const f = $(ui.mode === 'c' ? '#inMin' : '#inR'); f.focus(); f.select();
+function addExHTML(){
+  return `<div class="add-head">
+      <h3>種目を追加</h3>
+      <div class="mode">
+        <button class="${ui.mode === 'w' ? 'is-on' : ''}" data-a="mode" data-m="w">筋トレ</button>
+        <button class="${ui.mode === 'c' ? 'is-on' : ''}" data-a="mode" data-m="c">有酸素</button>
+      </div>
+    </div>
+    <div class="add-field">
+      <input id="addQ" value="${esc(ui.sheetQ)}" placeholder="${
+        ui.mode === 'c' ? 'ランニング、バイクなど' : '種目名を入力'}" autocomplete="off" spellcheck="false">
+      ${ui.sheetQ ? '<button class="btn-text" data-a="clear">消す</button>' : ''}
+    </div>
+    ${ui.mode === 'w' ? `<div class="add-parts">${PARTS.map(p =>
+      `<button class="part ${ui.part === p.id ? 'is-on' : ''}" data-a="part" data-p="${p.id}"
+        style="--pig:var(--p-${p.id})"><i></i>${p.ja}</button>`).join('')}</div>` : ''}
+    <div class="add-list" id="addList">${addListHTML()}</div>`;
+}
+function addListHTML(){
+  const q = normName(ui.sheetQ), lc = q.toLowerCase();
+  const pool = allExercises().filter(e => !!e.cardio === (ui.mode === 'c'));
+  let head, items;
+  if (q){
+    items = pool.filter(e => e.name.toLowerCase().includes(lc));
+    head  = items.length ? '履歴から' : '';
+  } else if (ui.mode === 'c'){
+    items = pool; head = '有酸素の履歴';
+  } else {
+    items = pool.filter(e => e.part === ui.part);
+    head  = items.length ? `${PART_JA[ui.part]}の履歴` : '最近の種目';
+    if (!items.length) items = pool;
+  }
+  const exists = pool.some(e => e.name.toLowerCase() === lc);
+  const rows = items.slice(0, 60).map(e => {
+    const n = setsOfEx(e.name).length;
+    const hit = q ? e.name.indexOf(q) : -1;
+    const label = hit >= 0
+      ? esc(e.name.slice(0,hit)) + '<mark>' + esc(e.name.slice(hit, hit+q.length)) + '</mark>' + esc(e.name.slice(hit+q.length))
+      : esc(e.name);
+    return `<button class="add-item" data-a="pick" data-v="${esc(e.name)}" data-p="${e.part}"
+      style="--pig:var(--p-${e.part})"><i></i><span>${label}</span><em>${n}</em></button>`;
+  });
+  const newRow = q && !exists
+    ? `<button class="add-item is-new" data-a="new" data-v="${esc(q)}"><i></i><span>「${esc(q)}」を新しい種目として追加</span></button>`
+    : '';
+  if (!rows.length && !newRow) return `<div class="add-empty">${
+    pool.length ? '該当する履歴がありません。' : '種目名を入力して追加してください。'}<br>
+    <span>一度記録した名前は、次から候補に出ます。</span></div>`;
+  return (head && rows.length ? `<div class="add-sec">${head}</div>` : '') + newRow + rows.join('');
 }
 
-/* ---------- セット記録 ---------- */
+function addExercise(name, part, cardio){
+  name = canonicalName(name);
+  if (!name) return;
+  ui.ex = name; ui.editing = null;
+  const existing = setsOn(ui.date).find(s => s.ex === name);
+  ui.pending = existing ? null : { name, part:part || ui.part, cardio:!!cardio };
+  syncInputs();
+  closeSheet();
+  renderLog();
+  const blk = $(`.blk.is-on`);
+  if (blk) blk.scrollIntoView({ block:'center', behavior:'smooth' });
+}
+
+$('#sheet').addEventListener('click', e => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const a = b.dataset.a;
+  if (a === 'mode'){ ui.mode = b.dataset.m; ui.sheetQ = ''; $('#sheetBox').innerHTML = addExHTML(); }
+  else if (a === 'part'){ ui.part = b.dataset.p; $('#sheetBox').innerHTML = addExHTML(); }
+  else if (a === 'clear'){ ui.sheetQ = ''; $('#sheetBox').innerHTML = addExHTML(); $('#addQ').focus(); }
+  else if (a === 'pick') addExercise(b.dataset.v, b.dataset.p, b.dataset.p === 'cardio');
+  else if (a === 'new')  addExercise(b.dataset.v, ui.part, ui.mode === 'c');
+});
+$('#sheet').addEventListener('input', e => {
+  if (e.target.id !== 'addQ') return;
+  ui.sheetQ = e.target.value;
+  $('#addList').innerHTML = addListHTML();
+});
+$('#sheet').addEventListener('keydown', e => {
+  if (e.target.id === 'addQ' && e.key === 'Enter'){
+    e.preventDefault();
+    const first = $('#addList .add-item'); if (first) first.click();
+  }
+});
+
+/* ---------- 記録 ---------- */
 function logSet(){
-  const name = canonicalName(ui.ex || '');
-  if (!name){ toast('種目名を入力してください'); $('#exIn').focus(); openPick(); return; }
-  if (ui.mode === 'c') return logCardio(name);
+  const name = ui.ex; if (!name) return;
+  const { cardio } = blockInfo(name);
+  if (cardio) return logCardio(name);
 
   const w = parseFloat(ui.w), r = parseInt(ui.r, 10);
-  if (!(r > 0)){ toast('回数を入れてください'); $('#inR').focus(); return; }
+  if (!(r > 0)){ toast('回数を入れてください'); $('#inr').focus(); return; }
   const wv = isFinite(w) && w > 0 ? Math.round(w*100)/100 : 0;
 
   if (ui.editing){
     const s = db.sets.find(x => x.id === ui.editing);
     if (s){ s.w = wv; s.r = r; }
-    ui.editing = null; save(); refreshLog();
-    toast('セットを更新しました');
+    ui.editing = null; save(); refreshLog(); toast('セットを更新しました');
     return;
   }
 
   const before = prOf(name);
-  const s = { id:uid(), date:ui.date, part:ui.part, ex:name, w:wv, r, ts:Date.now() };
-  db.sets.push(s); save();
-  ui.partLocked = false;
-  if (ui.ex !== name){ ui.ex = name; const el = $('#exIn'); if (el) el.value = name; }
+  const part = ui.pending ? ui.pending.part : blockInfo(name).part;
+  const s = { id:uid(), date:ui.date, part, ex:name, w:wv, r, ts:Date.now() };
+  db.sets.push(s); save(); ui.pending = null;
 
   const isPR = !before || wv > before.w || (wv === before.w && r > before.r);
   refreshLog();
 
-  if (isPR && before){
-    toast(`<b>自己ベスト更新</b>　${esc(name)}　${w2s(wv)}kg × ${r}`, { pr:true, ms:4200 });
-  } else {
+  if (isPR && before) toast(`<b>自己ベスト更新</b>　${esc(name)}　${w2s(wv)}kg × ${r}`, { pr:true, ms:4200 });
+  else {
     const n = setsOn(ui.date).filter(x => x.ex === name).length;
-    toast(`${esc(name)} <b>${n}</b>セット目を記録`, {
-      action:'取り消す',
-      onAction(){ db.sets = db.sets.filter(x => x.id !== s.id); save(); refreshLog(); tReset(); }
-    });
+    toast(`${esc(name)} <b>${n}</b>セット目を記録`, { action:'取り消す',
+      onAction(){ db.sets = db.sets.filter(x => x.id !== s.id); save(); refreshLog(); tReset(); } });
   }
   if (db.settings.auto) tStart(db.settings.rest);
 }
 
 function logCardio(name){
-  const min = parseInt(ui.min, 10);
-  const kmv = parseFloat(ui.km);
-  if (!(min > 0)){ toast('時間を入れてください'); $('#inMin').focus(); return; }
+  const min = parseInt(ui.min, 10), kmv = parseFloat(ui.km);
+  if (!(min > 0)){ toast('時間を入れてください'); $('#inmin').focus(); return; }
   const km = isFinite(kmv) && kmv > 0 ? Math.round(kmv * 100) / 100 : 0;
 
   if (ui.editing){
     const s = db.sets.find(x => x.id === ui.editing);
     if (s){ s.min = min; s.km = km; }
-    ui.editing = null; save(); refreshLog();
-    toast('記録を更新しました');
+    ui.editing = null; save(); refreshLog(); toast('記録を更新しました');
     return;
   }
 
   const best = cardioBest(name);
   const s = { id:uid(), date:ui.date, part:'cardio', ex:name, k:'c', min, km, ts:Date.now() };
-  db.sets.push(s); save();
-  if (ui.ex !== name){ ui.ex = name; const el = $('#exIn'); if (el) el.value = name; }
+  db.sets.push(s); save(); ui.pending = null;
   refreshLog();
 
-  const far = best && km > 0 && km > (best.far.km || 0);
-  if (far){
+  if (best && km > 0 && km > (best.far.km || 0))
     toast(`<b>自己最長</b>　${esc(name)}　${km2s(km)}km`, { pr:true, ms:4200 });
-  } else {
-    toast(`${esc(name)} <b>${fmtDur(min)}</b>${km ? ' ' + km2s(km) + 'km' : ''} を記録`, {
-      action:'取り消す',
-      onAction(){ db.sets = db.sets.filter(x => x.id !== s.id); save(); refreshLog(); }
-    });
-  }
-  /* 有酸素はセット間の休憩を前提としないので、インターバルは自動で始めない */
+  else
+    toast(`${esc(name)} <b>${fmtDur(min)}</b>${km ? ' ' + km2s(km) + 'km' : ''} を記録`, { action:'取り消す',
+      onAction(){ db.sets = db.sets.filter(x => x.id !== s.id); save(); refreshLog(); } });
+  /* 有酸素はセット間休憩を前提としないので、インターバルは自動で始めない */
 }
 
+function focusEx(name){
+  if (ui.ex === name && !ui.editing) return;
+  ui.ex = name; ui.editing = null; ui.pending = null;
+  syncInputs(); refreshLog();
+}
 function editSet(id){
   const s = db.sets.find(x => x.id === id); if (!s) return;
-  ui.editing = id; ui.ex = s.ex;
-  if (isCardio(s)){
-    ui.mode = 'c'; ui.min = String(s.min); ui.km = s.km ? km2s(s.km) : '';
-  } else {
-    ui.mode = 'w'; ui.part = s.part; ui.w = w2s(s.w); ui.r = String(s.r);
-  }
-  renderLog();
-  const f = $(isCardio(s) ? '#inMin' : '#inW'); f.focus(); f.select();
+  ui.ex = s.ex; ui.editing = id; ui.pending = null;
+  if (isCardio(s)){ ui.min = String(s.min); ui.km = s.km ? km2s(s.km) : ''; }
+  else { ui.w = w2s(s.w); ui.r = String(s.r); }
+  refreshLog();
+  const f = $(isCardio(s) ? '#inmin' : '#inw'); if (f){ f.focus(); f.select(); }
 }
 function delSet(id){
   const i = db.sets.findIndex(x => x.id === id); if (i < 0) return;
   const [s] = db.sets.splice(i, 1); save();
   if (ui.editing === id) ui.editing = null;
+  if (!setsOn(s.date).some(x => x.ex === s.ex) && ui.ex === s.ex && s.date === ui.date)
+    ui.pending = { name:s.ex, part:isCardio(s) ? 'cardio' : s.part, cardio:isCardio(s) };
   refreshLog();
-  toast('セットを削除しました', { action:'元に戻す', onAction(){ db.sets.splice(i, 0, s); save(); refreshLog(); } });
+  toast('セットを削除しました', { action:'元に戻す',
+    onAction(){ db.sets.splice(i, 0, s); ui.pending = null; save(); refreshLog(); } });
 }
 function dupSet(id){
   const s = db.sets.find(x => x.id === id); if (!s) return;
-  ui.ex = s.ex;
-  if (isCardio(s)){ ui.mode = 'c'; ui.min = String(s.min); ui.km = s.km ? km2s(s.km) : ''; }
-  else { ui.mode = 'w'; ui.part = s.part; ui.w = w2s(s.w); ui.r = String(s.r); }
+  ui.ex = s.ex; ui.editing = null; ui.pending = null;
+  if (isCardio(s)){ ui.min = String(s.min); ui.km = s.km ? km2s(s.km) : ''; }
+  else { ui.w = w2s(s.w); ui.r = String(s.r); }
   db.sets.push({ ...s, id:uid(), ts:Date.now() }); save();
-  renderLog();
+  refreshLog();
   if (!isCardio(s) && db.settings.auto) tStart(db.settings.rest);
 }
-
 function rowMenu(btn, id){
   $$('.lg-pop').forEach(p => p.remove());
   const pop = document.createElement('div');
@@ -832,9 +805,9 @@ function rowMenu(btn, id){
   pop.innerHTML = `<button data-l="edit" data-id="${id}">編集</button>
                    <button data-l="dup" data-id="${id}">複製</button>
                    <button class="d" data-l="del" data-id="${id}">削除</button>`;
-  btn.closest('.lg-row').appendChild(pop);
+  btn.closest('.srow').appendChild(pop);
   setTimeout(() => document.addEventListener('click', function off(e){
-    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', off); }
+    if (!pop.contains(e.target)){ pop.remove(); document.removeEventListener('click', off); }
   }), 0);
 }
 
@@ -842,45 +815,30 @@ function rowMenu(btn, id){
 $('#page-log').addEventListener('click', e => {
   const b = e.target.closest('[data-l]'); if (!b) return;
   const l = b.dataset.l;
-  if (l === 'day'){ ui.date = shiftDay(ui.date, +b.dataset.n); ui.editing = null; ui.partLocked = false; syncInputs(); renderLog(); }
-  else if (l === 'today'){ ui.date = today(); ui.editing = null; renderLog(); }
-  else if (l === 'part'){
-    ui.part = b.dataset.p; ui.partLocked = true;
-    if (ui.ex && partOfEx(ui.ex) !== ui.part){ ui.ex = ''; $('#exIn').value = ''; syncInputs(); }
-    renderLog(); $('#exIn').focus(); openPick();
-  }
-  else if (l === 'pickex') chooseEx(b.dataset.v);
-  else if (l === 'newex') chooseEx(b.dataset.v);
-  else if (l === 'mode'){
-    if (ui.mode === b.dataset.m) return;
-    ui.mode = b.dataset.m; ui.editing = null; ui.ex = ''; ui.partLocked = false;
-    syncInputs(); renderLog(); $('#exIn').focus(); openPick();
-  }
-  else if (l === 'min'){ setMin(String(clamp((parseInt(ui.min,10)||0) + parseFloat(b.dataset.n), 0, 999))); }
-  else if (l === 'km'){ setKm(km2s(clamp((parseFloat(ui.km)||0) + parseFloat(b.dataset.n), 0, 999))); }
-  else if (l === 'w'){ setW(w2s(clamp((parseFloat(ui.w)||0) + parseFloat(b.dataset.n), 0, 999))); }
-  else if (l === 'r'){ setR(String(clamp((parseInt(ui.r,10)||0) + parseInt(b.dataset.n,10), 0, 999))); }
-  else if (l === 'rset'){ setR(b.dataset.n); }
-  else if (l === 'applyPrev'){
-    if (ui.mode === 'c'){ setMin(b.dataset.min); setKm(b.dataset.km ? km2s(+b.dataset.km) : ''); }
-    else { setW(w2s(+b.dataset.w)); setR(b.dataset.r); }
-  }
-  else if (l === 'cancelEdit'){ ui.editing = null; refreshLog(); }
-  else if (l === 'jump'){ ui.date = b.dataset.d; ui.editing = null; syncInputs(); renderLog(); window.scrollTo(0,0); }
+  if (l === 'day'){ ui.date = shiftDay(ui.date, +b.dataset.n); ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); }
+  else if (l === 'today'){ ui.date = today(); ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); }
+  else if (l === 'jump'){ ui.date = b.dataset.d; ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); window.scrollTo(0,0); }
+  else if (l === 'addex') sheetAddEx();
+  else if (l === 'focus') focusEx(b.dataset.v);
+  else if (l === 'w')    setVal('w', w2s(clamp((parseFloat(ui.w)||0) + parseFloat(b.dataset.n), 0, 999)));
+  else if (l === 'r')    setVal('r', String(clamp((parseInt(ui.r,10)||0) + parseInt(b.dataset.n,10), 0, 999)));
+  else if (l === 'rset') setVal('r', b.dataset.n);
+  else if (l === 'min')  setVal('min', String(clamp((parseInt(ui.min,10)||0) + parseFloat(b.dataset.n), 0, 999)));
+  else if (l === 'km')   setVal('km', km2s(clamp((parseFloat(ui.km)||0) + parseFloat(b.dataset.n), 0, 999)));
+  else if (l === 'cancelEdit'){ ui.editing = null; syncInputs(); refreshLog(); }
   else if (l === 'log') logSet();
   else if (l === 'menu') rowMenu(b, b.dataset.id);
   else if (l === 'edit') editSet(b.dataset.id);
-  else if (l === 'dup') dupSet(b.dataset.id);
-  else if (l === 'del') delSet(b.dataset.id);
+  else if (l === 'dup')  dupSet(b.dataset.id);
+  else if (l === 'del')  delSet(b.dataset.id);
 });
 
 $('#page-log').addEventListener('input', e => {
   const t = e.target;
-  if (t.id === 'inW') ui.w = t.value;
-  else if (t.id === 'inR') ui.r = t.value;
-  else if (t.id === 'inMin'){ ui.min = t.value; repaint(); }
-  else if (t.id === 'inKm'){ ui.km = t.value; repaint(); }
-  else if (t.id === 'exIn'){ ui.ex = t.value; ui.pickQ = t.value; ui.pickCur = 0; openPick(); }
+  if (t.id === 'inw') ui.w = t.value;
+  else if (t.id === 'inr') ui.r = t.value;
+  else if (t.id === 'inmin'){ ui.min = t.value; repaintPace(); }
+  else if (t.id === 'inkm'){ ui.km = t.value; repaintPace(); }
   else if (t.id === 'noteIn'){
     const v = t.value.trim();
     if (v) db.notes[ui.date] = v; else delete db.notes[ui.date];
@@ -888,38 +846,10 @@ $('#page-log').addEventListener('input', e => {
   }
 });
 
-$('#page-log').addEventListener('focusin', e => { if (e.target.id === 'exIn'){ ui.pickQ = ''; openPick(); } });
-
 $('#page-log').addEventListener('keydown', e => {
   const t = e.target;
-  if (t.id === 'exIn'){
-    const items = $$('.pm-item');
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
-      e.preventDefault();
-      ui.pickCur = clamp(ui.pickCur + (e.key === 'ArrowDown' ? 1 : -1), 0, items.length - 1);
-      repick();
-      const cur = $('.pm-item.is-cur'); if (cur) cur.scrollIntoView({ block:'nearest' });
-    } else if (e.key === 'Enter'){
-      e.preventDefault();
-      const cur = $('.pm-item.is-cur'); if (cur) cur.click();
-    } else if (e.key === 'Escape'){ closePick(); t.blur(); }
-    return;
-  }
-  const NUMS = ['inW','inR','inMin','inKm'];
-  if (e.key === 'Enter' && NUMS.includes(t.id)){ e.preventDefault(); logSet(); }
+  if (['inw','inr','inmin','inkm'].includes(t.id) && e.key === 'Enter'){ e.preventDefault(); logSet(); }
   if (t.id === 'noteIn' && e.key === 'Enter') t.blur();
-  if (NUMS.includes(t.id) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')){
-    e.preventDefault();
-    const d = e.key === 'ArrowUp' ? 1 : -1;
-    if (t.id === 'inW')        setW(w2s(clamp((parseFloat(ui.w)||0) + d * db.settings.wStep, 0, 999)));
-    else if (t.id === 'inR')   setR(String(clamp((parseInt(ui.r,10)||0) + d, 0, 999)));
-    else if (t.id === 'inMin') setMin(String(clamp((parseInt(ui.min,10)||0) + d, 0, 999)));
-    else                       setKm(km2s(clamp((parseFloat(ui.km)||0) + d * 0.5, 0, 999)));
-  }
-});
-
-document.addEventListener('click', e => {
-  if (ui.pickOpen && !e.target.closest('#pick')) closePick();
 });
 
 /* =========================================================
@@ -1153,7 +1083,12 @@ $('#page-ex').addEventListener('click', e => {
   const b = e.target.closest('[data-x]'); if (!b) return;
   const x = b.dataset.x;
   if (x === 'use'){
-    ui.ex = b.dataset.v; ui.part = partOfEx(ui.ex) || ui.part; ui.editing = null; ui.partLocked = false;
+    // 今日まだ記録がなければ、記録ページにその種目のブロックを用意して開く
+    const name = b.dataset.v, part = partOfEx(name) || ui.part;
+    ui.ex = name; ui.editing = null;
+    ui.part = part === 'cardio' ? ui.part : part;
+    ui.pending = setsOn(ui.date).some(s => s.ex === name)
+      ? null : { name, part, cardio:isCardioEx(name) };
     syncInputs(); renderLog(); go('log');
   }
   else if (x === 'clear'){ ui.exQ = ''; renderEx(); }
@@ -1375,9 +1310,6 @@ function setHTML(){
       <div class="set-row"><div><h4>すべて削除</h4><p>取り消せません。先に書き出しておくことをおすすめします。</p></div>
         <div class="set-ctl"><button class="btn-text is-danger" data-s="wipe">全データを削除</button></div></div>
 
-      <div class="set-sec-t">キーボード</div>
-      <div class="set-row"><div><h4>ショートカット</h4>
-        <p><b>1</b>–<b>5</b> ページ切替　/　<b>Enter</b> セットを記録　/　<b>↑↓</b> 数値の増減　/　<b>T</b> タイマー開始・停止</p></div></div>
     </div>
   </div>`;
 }
@@ -1405,9 +1337,15 @@ $('#page-set').addEventListener('input', e => {
 });
 
 /* ---------- シート ---------- */
-function openSheet(html){ $('#sheetBox').innerHTML = html; $('#sheet').hidden = false; }
+function openSheet(html, cls){
+  const box = $('#sheetBox');
+  box.className = 'sheet-box' + (cls ? ' ' + cls : '');
+  box.innerHTML = html;
+  $('#sheet').hidden = false;
+}
 function closeSheet(){ $('#sheet').hidden = true; $('#sheetBox').innerHTML = ''; }
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); });
 
 function sheetExport(){
   const json = JSON.stringify(db, null, 1);
@@ -1514,24 +1452,6 @@ $('#themeBtn').onclick = () => {
   toast(`外観：${{auto:'自動', light:'ライト', dark:'ダーク'}[db.settings.theme]}`, { ms:1600 });
   if (ui.page === 'set') renderSet();
 };
-
-/* ---------- グローバルキー ---------- */
-const NAVKEY = { '1':'log', '2':'cal', '3':'ex', '4':'stat', '5':'set' };
-document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const t = e.target;
-  const typing = t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable;
-  if (e.key === 'Escape' && !$('#sheet').hidden){ closeSheet(); return; }
-  if (typing) return;
-  if (NAVKEY[e.key]){ e.preventDefault(); go(NAVKEY[e.key]); }
-  else if (e.key === 't' || e.key === 'T'){
-    e.preventDefault();
-    if (T.done) tReset(); else if (T.run) tPause(); else tStart(T.left > 0 ? 0 : db.settings.rest);
-  }
-  else if (e.key === 'Enter' && ui.page === 'log' && t.tagName !== 'BUTTON' && t.tagName !== 'A'){
-    e.preventDefault(); logSet();
-  }
-});
 
 window.addEventListener('resize', () => { clearTimeout(window.__rz); window.__rz = setTimeout(tRender, 150); });
 
