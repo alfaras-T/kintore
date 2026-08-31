@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>PLATE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="rail">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 28 20" aria-hidden="true">
+        <rect x="0"  y="4"  width="3"  height="12" rx="1"/>
+        <rect x="4.5" y="1" width="4"  height="18" rx="1.2"/>
+        <rect x="10" y="8.4" width="8" height="3.2"/>
+        <rect x="19.5" y="1" width="4" height="18" rx="1.2"/>
+        <rect x="25" y="4"  width="3"  height="12" rx="1"/>
+      </svg>
+      <div class="brand-txt">
+        <b>PLATE</b>
+        <span>筋トレ記録</span>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item is-on" data-page="log">記録<kbd>1</kbd></button>
+      <button class="nav-item" data-page="cal">カレンダー<kbd>2</kbd></button>
+      <button class="nav-item" data-page="ex">種目<kbd>3</kbd></button>
+      <button class="nav-item" data-page="stat">分析<kbd>4</kbd></button>
+      <button class="nav-item nav-item--minor" data-page="set">設定<kbd>5</kbd></button>
+    </nav>
+
+    <div class="rail-foot">
+      <div class="streak" id="railStreak"></div>
+      <button class="theme-btn" id="themeBtn" title="外観を切り替え"><span></span></button>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <section class="page is-on" id="page-log"></section>
+    <section class="page" id="page-cal"></section>
+    <section class="page" id="page-ex"></section>
+    <section class="page" id="page-stat"></section>
+    <section class="page" id="page-set"></section>
+  </main>
+
+</div>
+
+<div class="dock" id="dock" hidden></div>
+<div class="toasts" id="toasts"></div>
+<div class="sheet" id="sheet" hidden><div class="sheet-box" id="sheetBox"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
