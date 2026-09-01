@@ -267,7 +267,10 @@ function tTick(){
   T.left = Math.max(0, Math.ceil((T.endAt - Date.now())/1000));
   if (T.left <= 0 && !T.done){
     T.done = true; T.run = false; clearInterval(T.iv);
-    ding(); if (navigator.vibrate) navigator.vibrate([90,70,90]);
+    ding();
+    // 一度も操作されていないページではブラウザが拒否して警告を出すので、事前に判定する
+    const active = navigator.userActivation ? navigator.userActivation.hasBeenActive : true;
+    try { if (active && navigator.vibrate) navigator.vibrate([90,70,90]); } catch(e){}
   }
   tRender();
 }
