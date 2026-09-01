@@ -18,6 +18,28 @@ const GROUPS  = PARTS.concat(CARDIO);            // 表示・集計上のまと�
 const PART_JA = Object.fromEntries(GROUPS.map(p => [p.id, p.ja]));
 
 const DOW = ['日','月','火','水','木','金','土'];
+
+/* 体調 5段階。絵文字は端末ごとに絵柄が変わるので自前で描く */
+const MOODS = [
+  { v:1, ja:'絶不調', mouth:'M8 16.5q4-3.6 8 0',   brow:'M5.6 8.2l3.2 1.4M18.4 8.2l-3.2 1.4' },
+  { v:2, ja:'不調',   mouth:'M8.2 15.6q3.8-2 7.6 0', brow:'' },
+  { v:3, ja:'ふつう', mouth:'M8.2 15h7.6',           brow:'' },
+  { v:4, ja:'good',   mouth:'M8.2 14.4q3.8 2 7.6 0', brow:'' },
+  { v:5, ja:'絶好調', mouth:'M7.8 13.6q4.2 4 8.4 0', brow:'M5.6 9.6l3.2-1.4M18.4 9.6l-3.2-1.4' },
+];
+MOODS[3].ja = '好調';
+
+function faceSVG(m, size){
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">
+    <circle cx="12" cy="12" r="10.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    ${m.v === 5
+      ? '<path d="M7.4 10.2q1.4-1.6 2.8 0M13.8 10.2q1.4-1.6 2.8 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+      : '<circle cx="8.9" cy="10.2" r="1.15" fill="currentColor"/><circle cx="15.1" cy="10.2" r="1.15" fill="currentColor"/>'}
+    ${m.brow ? `<path d="${m.brow}" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>` : ''}
+    <path d="${m.mouth}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>`;
+}
+const moodOf = d => db.mood[d] || 0;
 const KEY = 'plate.v1';
 
 /* ---------- 小道具 ---------- */
@@ -35,21 +57,26 @@ function parseYmd(s){ const [y,m,d] = s.split('-').map(Number); return new Date(
 function today(){ return ymd(new Date()); }
 function shiftDay(s, n){ const d = parseYmd(s); d.setDate(d.getDate()+n); return ymd(d); }
 function diffDays(a, b){ return Math.round((parseYmd(a) - parseYmd(b)) / 864e5); }
+const isFuture = d => d > today();          // 未来日は記録も選択もできない
 
 /* 数値は 62.5 → "62.5"、60 → "60" */
 function w2s(n){ return (Math.round(n*100)/100).toString(); }
 
 /* ---------- ストア ---------- */
-const DEFAULT_SETTINGS = { rest:90, auto:true, sound:true, theme:'auto', wStep:2.5, presets:[60,90,120,180] };
+/* 週の目標。既定は WHO・厚生労働省の身体活動基準に合わせる */
+const WHO_MIN = 150, WHO_DAYS = 2;
+const DEFAULT_SETTINGS = { rest:90, auto:true, sound:true, theme:'auto', wStep:2.5,
+                           presets:[60,90,120,180], goalMin:WHO_MIN, goalDays:WHO_DAYS };
 
 let db = load();
 
 function load(){
   let raw = null;
   try { raw = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ raw = null; }
-  const d = raw && raw.sets ? raw : { v:1, sets:[], notes:{}, settings:{} };
+  const d = raw && raw.sets ? raw : { v:1, sets:[], notes:{}, mood:{}, settings:{} };
   d.sets     = Array.isArray(d.sets) ? d.sets : [];
   d.notes    = d.notes  || {};
+  d.mood     = d.mood   || {};
   d.settings = Object.assign({}, DEFAULT_SETTINGS, d.settings || {});
   delete d.custom;            // 旧バージョンの自作種目リストは使わない
   return d;
@@ -217,11 +244,23 @@ function tStart(sec){
   tRender();
 }
 function tPause(){ T.run = false; clearInterval(T.iv); T.left = Math.max(0, Math.ceil((T.endAt - Date.now())/1000)); tRender(); }
-function tReset(){ T.run = false; T.done = false; clearInterval(T.iv); T.left = T.total; tRender(); }
+/* リセットは「設定した既定の休憩時間」へ戻す。+30 を重ねても元に戻せる。 */
+function tReset(){
+  T.run = false; T.done = false; clearInterval(T.iv);
+  T.total = db.settings.rest; T.left = T.total;
+  tRender();
+}
 function tAdd(sec){
-  if (T.done){ T.done = false; T.total = sec; T.left = sec; tStart(); return; }
-  T.total += sec;
-  if (T.run) T.endAt += sec*1000; else T.left += sec;
+  if (T.done){ T.done = false; T.total = Math.max(5, sec); T.left = T.total; tStart(); return; }
+  const nt = clamp(T.total + sec, 5, 3600);
+  const d  = nt - T.total;                 // 実際に動いた分だけ残り時間も動かす
+  T.total = nt;
+  if (T.run){
+    T.endAt += d * 1000;
+    if (T.endAt <= Date.now()){ T.left = 0; tTick(); return; }
+  } else {
+    T.left = clamp(T.left + d, 0, T.total);
+  }
   tRender();
 }
 function tTick(){
@@ -275,11 +314,13 @@ function tRender(){
     if (dock.hidden){ dock.hidden = false; dock.innerHTML = dockHTML(); }
     dock.dataset.s = tState();
     dock.style.setProperty('--p', p);
+    document.documentElement.style.setProperty('--dock-h', dock.offsetHeight + 'px');
     $('#dRead', dock).textContent = mmss(T.left);
     $('#dLab', dock).textContent = T.done ? 'インターバル完了' : 'インターバル';
     $('#dGo', dock).textContent = T.done ? '閉じる' : T.run ? '一時停止' : (T.left < T.total ? '再開' : '開始');
   } else if (!dock.hidden){
     dock.hidden = true; dock.innerHTML = '';
+    document.documentElement.style.setProperty('--dock-h', '0px');
   }
 }
 const isNarrow = () => window.matchMedia('(max-width:960px)').matches;
@@ -290,9 +331,12 @@ function dockHTML(){
       <div class="dock-read n" id="dRead">00:00</div>
     </div>
     <div class="dock-acts">
-      <button class="btn-ghost" data-t="add" data-sec="30">+30秒</button>
+      <div class="nudge">
+        <button data-t="add" data-sec="-30" aria-label="30秒 短く">−30</button>
+        <button data-t="add" data-sec="30" aria-label="30秒 延長">+30</button>
+      </div>
       <button class="btn-solid" data-t="go" id="dGo">一時停止</button>
-      <button class="icon-btn dock-reset" data-t="reset" aria-label="リセット">×</button>
+      <button class="icon-btn dock-reset" data-t="reset" aria-label="既定の長さに戻す">⟲</button>
     </div>`;
 }
 
@@ -362,7 +406,7 @@ function dateHeadHTML(){
   const d = parseYmd(ui.date), n = diffDays(ui.date, today());
   const rel = n === 0 ? '<b>今日</b>' : n === -1 ? '昨日' : n === 1 ? '明日'
             : n < 0 ? `${-n}日前` : `${n}日後`;
-  return `<div class="datenav">
+  return `<div class="log-head"><div class="datenav">
     <button class="icon-btn" data-l="day" data-n="-1" aria-label="前の日">‹</button>
     <div class="date-block">
       <div class="date-line">
@@ -371,8 +415,20 @@ function dateHeadHTML(){
       </div>
       <div class="date-sub">${d.getFullYear()}年 · ${rel}</div>
     </div>
-    <button class="icon-btn" data-l="day" data-n="1" aria-label="次の日">›</button>
+    <button class="icon-btn" data-l="day" data-n="1" aria-label="次の日"
+      ${isFuture(shiftDay(ui.date, 1)) ? 'disabled' : ''}>›</button>
     ${n !== 0 ? '<button class="btn-text" data-l="today" style="margin-left:8px">今日へ</button>' : ''}
+  </div>
+  ${moodHTML()}</div>`;
+}
+
+function moodHTML(){
+  const cur = moodOf(ui.date);
+  return `<div class="mood" id="mood">
+    <span class="mood-l">${cur ? MOODS[cur-1].ja : '体調'}</span>
+    <div class="mood-row">${MOODS.map(m =>
+      `<button class="mood-b ${cur === m.v ? 'is-on' : ''}" data-l="mood" data-v="${m.v}"
+        aria-label="${m.ja}" aria-pressed="${cur === m.v}" title="${m.ja}">${faceSVG(m, 26)}</button>`).join('')}</div>
   </div>`;
 }
 
@@ -544,8 +600,11 @@ function timerHTML(){
     </div>
     <div class="timer-acts">
       <button class="btn-solid" data-t="go" id="tGo">開始</button>
-      <button class="btn-ghost" data-t="add" data-sec="30">+30秒</button>
-      <button class="btn-text" data-t="reset">リセット</button>
+      <div class="nudge">
+        <button data-t="add" data-sec="-30">−30</button>
+        <button data-t="add" data-sec="30">+30</button>
+      </div>
+      <button class="btn-text" data-t="reset">既定に戻す</button>
     </div>
   </section>`;
 }
@@ -633,7 +692,7 @@ function addExHTML(){
     <div class="add-field">
       <input id="addQ" value="${esc(ui.sheetQ)}" placeholder="${
         ui.mode === 'c' ? 'ランニング、バイクなど' : '種目名を入力'}" autocomplete="off" spellcheck="false">
-      ${ui.sheetQ ? '<button class="btn-text" data-a="clear">消す</button>' : ''}
+      ${ui.sheetQ ? '<button class="btn-text" data-a="clear">クリア</button>' : ''}
     </div>
     ${ui.mode === 'w' ? `<div class="add-parts">${PARTS.map(p =>
       `<button class="part ${ui.part === p.id ? 'is-on' : ''}" data-a="part" data-p="${p.id}"
@@ -665,12 +724,17 @@ function addListHTML(){
       style="--pig:var(--p-${e.part})"><i></i><span>${label}</span><em>${n}</em></button>`;
   });
   const newRow = q && !exists
-    ? `<button class="add-item is-new" data-a="new" data-v="${esc(q)}"><i></i><span>「${esc(q)}」を新しい種目として追加</span></button>`
+    ? `<button class="add-new" data-a="new" data-v="${esc(q)}">
+         <span class="add-new-p">＋</span>
+         <span class="add-new-t"><b>「${esc(q)}」を追加</b>
+           <em>${ui.mode === 'c' ? '有酸素' : PART_JA[ui.part]}の新しい種目として登録します</em></span>
+         <span class="add-new-go">›</span>
+       </button>`
     : '';
   if (!rows.length && !newRow) return `<div class="add-empty">${
-    pool.length ? '該当する履歴がありません。' : '種目名を入力して追加してください。'}<br>
-    <span>一度記録した名前は、次から候補に出ます。</span></div>`;
-  return (head && rows.length ? `<div class="add-sec">${head}</div>` : '') + newRow + rows.join('');
+    pool.length ? '該当する履歴がありません。' : '種目名を入力すると、ここに追加ボタンが出ます。'}<br>
+    <span>一度記録した名前は、次から候補に並びます。</span></div>`;
+  return newRow + (head && rows.length ? `<div class="add-sec">${head}</div>` : '') + rows.join('');
 }
 
 function addExercise(name, part, cardio){
@@ -815,9 +879,17 @@ function rowMenu(btn, id){
 $('#page-log').addEventListener('click', e => {
   const b = e.target.closest('[data-l]'); if (!b) return;
   const l = b.dataset.l;
-  if (l === 'day'){ ui.date = shiftDay(ui.date, +b.dataset.n); ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); }
+  if (l === 'day'){
+    const nd = shiftDay(ui.date, +b.dataset.n);
+    if (isFuture(nd)) return;
+    ui.date = nd; ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); }
   else if (l === 'today'){ ui.date = today(); ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); }
   else if (l === 'jump'){ ui.date = b.dataset.d; ui.ex = ''; ui.editing = null; ui.pending = null; renderLog(); window.scrollTo(0,0); }
+  else if (l === 'mood'){
+    const v = +b.dataset.v;
+    if (moodOf(ui.date) === v) delete db.mood[ui.date]; else db.mood[ui.date] = v;
+    save(); $('#mood').outerHTML = moodHTML();
+  }
   else if (l === 'addex') sheetAddEx();
   else if (l === 'focus') focusEx(b.dataset.v);
   else if (l === 'w')    setVal('w', w2s(clamp((parseFloat(ui.w)||0) + parseFloat(b.dataset.n), 0, 999)));
@@ -889,8 +961,8 @@ function calHTML(){
     const by = {}; for (const s of ss) by[isCardio(s) ? 'cardio' : s.part] = (by[isCardio(s) ? 'cardio' : s.part] || 0) + effVol(s);
     const bars = GROUPS.filter(p => by[p.id]).map(p =>
       `<i style="--pig:var(--p-${p.id}); height:${clamp(by[p.id]/maxDay*100, 10, 100)}%"></i>`).join('');
-    return `<button class="day ${out ? 'is-out' : ''} ${ss.length ? '' : 'is-rest'} ${k === today() ? 'is-today' : ''} ${k === ui.calSel ? 'is-sel' : ''}"
-      data-c="sel" data-d="${k}" title="${k}">
+    return `<button class="day ${out ? 'is-out' : ''} ${ss.length ? '' : 'is-rest'} ${k === today() ? 'is-today' : ''} ${k === ui.calSel ? 'is-sel' : ''} ${isFuture(k) ? 'is-future' : ''}"
+      data-c="sel" data-d="${k}" title="${k}" ${isFuture(k) ? 'disabled' : ''}>
       <span class="day-n">${d.getDate()}</span>
       <span class="day-bars">${bars}</span>
       ${ss.length ? `<span class="day-sets">${ss.length}<span style="opacity:.6"> set</span></span>` : ''}
@@ -905,7 +977,7 @@ function calHTML(){
           <div class="n">${y}<i>.</i>${String(m+1).padStart(2,'0')}</div>
           <span>${days.length ? `${days.length}日トレーニング` : 'この月の記録はまだありません'}</span>
         </div>
-        <button class="icon-btn" data-c="mv" data-n="1" title="次の月">›</button>
+        <button class="icon-btn" data-c="mv" data-n="1" title="次の月" ${isThis ? 'disabled' : ''}>›</button>
         ${isThis ? '' : '<button class="btn-text" data-c="thismonth" style="margin-left:10px">今月へ</button>'}
       </div>
       <div class="cal-sum kpis">
@@ -939,6 +1011,8 @@ function calSideHTML(){
   const head = `<div class="cd-head">
       <span class="n">${d.getMonth()+1}<i>/</i>${d.getDate()}</span>
       <p>${DOW[d.getDay()]}曜日</p>
+      ${moodOf(k) ? `<span class="cd-mood" title="${MOODS[moodOf(k)-1].ja}">${
+        faceSVG(MOODS[moodOf(k)-1], 18)}<em>${MOODS[moodOf(k)-1].ja}</em></span>` : ''}
       <button class="btn-text" data-c="goto" data-d="${k}">${ss.length ? '編集する →' : '記録する →'}</button>
     </div>`;
 
@@ -977,10 +1051,13 @@ $('#page-cal').addEventListener('click', e => {
   if (c === 'mv'){
     let m = ui.calM + (+b.dataset.n), y = ui.calY;
     if (m < 0){ m = 11; y--; } if (m > 11){ m = 0; y++; }
+    const now = new Date();
+    if (y > now.getFullYear() || (y === now.getFullYear() && m > now.getMonth())) return;
     ui.calM = m; ui.calY = y; renderCal();
   }
   else if (c === 'thismonth'){ const n = new Date(); ui.calM = n.getMonth(); ui.calY = n.getFullYear(); renderCal(); }
   else if (c === 'sel'){
+    if (isFuture(b.dataset.d)) return;
     ui.calSel = b.dataset.d;
     const d = parseYmd(ui.calSel);
     if (d.getMonth() !== ui.calM){ ui.calM = d.getMonth(); ui.calY = d.getFullYear(); renderCal(); return; }
@@ -1050,7 +1127,7 @@ function exHTML(){
     <div class="empty" style="max-width:400px">
       <h4>まだ種目の履歴がありません</h4>
       <p>記録ページで種目名を入力してセットを記録すると、その名前がここに残ります。次からは入力欄の候補から選べます。</p>
-      <button class="btn-ghost" data-x="go" style="margin-top:16px">記録をはじめる →</button>
+      <button class="btn-ghost" data-x="go" style="margin-top:16px">記録を始める →</button>
     </div></div>`;
 
   const q = normName(ui.exQ);
@@ -1151,6 +1228,24 @@ function weeks(n){
   for (let i = 0; i < n; i++){ out.unshift(w); w = shiftDay(w, -7); }
   return out;
 }
+/* 筋トレは時間を記録しないので、セット数から見積もる。
+   1セット = 作業 SET_WORK 秒 + 設定した休憩時間。 */
+const SET_WORK = 40;
+const strengthMin = nSets => nSets * (SET_WORK + db.settings.rest) / 60;
+
+/* 週の活動量。筋トレの「回数」は実施した日数で数える（目安の定義に合わせる） */
+function weekActivity(w){
+  const end = shiftDay(w, 6);
+  const ss  = db.sets.filter(x => x.date >= w && x.date <= end);
+  const wS  = ss.filter(x => !isCardio(x));
+  return {
+    cMin:  ss.filter(isCardio).reduce((a,x) => a + x.min, 0),
+    sets:  wS.length,
+    days:  new Set(wS.map(x => x.date)).size,
+    sMin:  strengthMin(wS.length),
+  };
+}
+
 function weekVolume(w){
   const end = shiftDay(w, 6);
   const by = Object.fromEntries(GROUPS.map(p => [p.id, 0]));
@@ -1166,9 +1261,9 @@ function statHTML(){
   if (!db.sets.length) return `<div class="wrap">
     <div class="ph"><div><h1>分析</h1><p>直近12週の推移と、部位ごとの偏り。</p></div></div>
     <div class="empty" style="max-width:380px">
-      <h4>まだ集計するものがありません</h4>
+      <h4>まだ集計できる記録がありません</h4>
       <p>セットを記録すると、週ごとの積み上げ、部位の偏り、種目ごとの自己ベストがここに並びます。</p>
-      <button class="btn-ghost" data-v="log" style="margin-top:16px">記録をはじめる →</button>
+      <button class="btn-ghost" data-v="log" style="margin-top:16px">記録を始める →</button>
     </div></div>`;
   const ws = weeks(12).map(w => ({ w, ...weekVolume(w) }));
   const maxEff = Math.max(1, ...ws.map(x => x.eff));
@@ -1212,6 +1307,8 @@ function statHTML(){
       </div>
     </div>
 
+    ${goalHTML()}
+
     <section class="stat-sec">
       <h3>週ごとの積み上げ — 直近12週</h3>
       <div class="wchart">
@@ -1241,6 +1338,8 @@ function statHTML(){
         </div>`).join('')}
       </div>
     </section>
+
+    ${balanceHTML(from30)}
 
     ${c30.length ? `<section class="stat-sec">
       <h3>有酸素 — 直近30日</h3>
@@ -1272,6 +1371,73 @@ function statHTML(){
 }
 function renderStat(){ $('#page-stat').innerHTML = statHTML(); }
 
+/* ③ 週の目標に対する今週の充足率 */
+function goalRow(label, pig, val, target, unit, sub, word){
+  const scale = Math.max(target * 1.25, val || 0);
+  const p = clamp((val / scale) * 100, 0, 100);
+  const m = clamp((target / scale) * 100, 0, 100);
+  const ok = val >= target;
+  const rest = target - val;
+  return `<div class="goal" style="--pig:${pig}">
+    <div class="goal-top">
+      <span class="goal-l">${label}</span>
+      <b class="n">${val % 1 ? val.toFixed(1) : val}<i>${unit}</i></b>
+      <span class="goal-s ${ok ? 'is-ok' : ''}">${ok ? `${word}を達成` : `あと${
+        unit === '分' ? Math.ceil(rest) : rest}${unit}`}</span>
+    </div>
+    <div class="goal-t" style="--p:${p.toFixed(1)}%; --m:${m.toFixed(1)}%"><i></i></div>
+    <div class="goal-b">${word} 週${target}${unit}${sub ? ` · ${sub}` : ''}</div>
+  </div>`;
+}
+
+function goalHTML(){
+  const gm = db.settings.goalMin, gd = db.settings.goalDays;
+  if (!gm && !gd) return '';
+  const w = weekStart(today());
+  const cur = weekActivity(w), prev = weekActivity(shiftDay(w, -7));
+  const nth = diffDays(today(), w) + 1;
+  const isWHO = gm === WHO_MIN && gd === WHO_DAYS;
+  return `<section class="stat-sec">
+    <h3>今週の活動量 <span class="h3-note">${
+      isWHO ? 'WHO・厚生労働省の目安に対して' : '設定した目標に対して'}</span>
+      <button class="btn-text stat-edit" data-v="set">目標を変更</button></h3>
+    <div class="goals ${gm && gd ? '' : 'is-single'}">
+      ${gm ? goalRow('有酸素', 'var(--p-cardio)', cur.cMin, gm, '分',
+        prev.cMin ? `先週 ${prev.cMin}分` : '', isWHO ? '目安' : '目標') : ''}
+      ${gd ? goalRow('筋トレ', 'color-mix(in srgb, var(--ink) 72%, transparent)', cur.days, gd, '回',
+        prev.days ? `先週 ${prev.days}回` : '', isWHO ? '目安' : '目標') : ''}
+    </div>
+    <p class="ts-note">月曜からの${nth}日目の集計です。${isWHO
+      ? '目安は「中強度の有酸素を週150分以上、筋力トレーニングを週2回以上」。'
+      : `目標は有酸素 週${gm}分・筋トレ 週${gd}回。設定ページで変えられます。`}</p>
+  </section>`;
+}
+
+/* ② 筋トレと有酸素の時間配分（筋トレはセット数からの推定） */
+function balanceHTML(from){
+  const ss = db.sets.filter(x => x.date >= from);
+  const nSets = ss.filter(x => !isCardio(x)).length;
+  const cSets = ss.filter(isCardio);
+  const sMin = strengthMin(nSets), cMin = cSets.reduce((a,x) => a + x.min, 0);
+  const tot = sMin + cMin;
+  if (!tot) return '';
+  const sp = Math.round(sMin / tot * 100), cp = 100 - sp;
+  const seg = (cls, pct, name) => pct <= 0 ? '' :
+    `<i class="${cls}" style="flex:${pct}">${pct >= 18 ? `<span>${name} ${pct}%</span>` : ''}</i>`;
+  return `<section class="stat-sec">
+    <h3>時間の配分 — 直近30日 <span class="h3-note">筋トレは推定値</span></h3>
+    <div class="tsplit">${seg('ts-w', sp, '筋トレ')}${seg('ts-c', cp, '有酸素')}</div>
+    <div class="tsrows">
+      <div class="tsrow"><span class="pig" style="--pig:color-mix(in srgb, var(--ink) 86%, transparent)"></span>
+        <span>筋トレ</span><b class="n">${durHTML(sMin)}</b><em>${nSets}セットから推定</em></div>
+      <div class="tsrow"><span class="pig" style="--pig:var(--p-cardio)"></span>
+        <span>有酸素</span><b class="n">${durHTML(cMin)}</b><em>${cSets.length}回</em></div>
+    </div>
+    <p class="ts-note">筋トレの時間は「1セット ≒ 作業${SET_WORK}秒 + 休憩${db.settings.rest}秒」で見積もっています。
+      設定の休憩時間を変えると再計算されます。</p>
+  </section>`;
+}
+
 /* =========================================================
    設定
    ========================================================= */
@@ -1294,8 +1460,17 @@ function setHTML(){
       <div class="set-row"><div><h4>終了音とバイブ</h4><p>0秒になったら短く3回鳴らします。</p></div>
         <div class="set-ctl"><button class="sw" data-s="sound" data-on="${s.sound?1:0}" aria-pressed="${s.sound}" aria-label="終了音とバイブ"></button></div></div>
 
+      <div class="set-sec-t">週の目標</div>
+      <div class="set-row"><div><h4>有酸素の目標</h4><p>1週間の合計時間。0 にすると目標を表示しません。</p></div>
+        <div class="set-ctl"><input class="num-sm n" id="goalMinIn" value="${s.goalMin}" inputmode="numeric"><span class="unit">分</span></div></div>
+      <div class="set-row"><div><h4>筋トレの目標</h4><p>1週間に筋トレをする日数。0 にすると目標を表示しません。</p></div>
+        <div class="set-ctl"><input class="num-sm n" id="goalDaysIn" value="${s.goalDays}" inputmode="numeric"><span class="unit">回</span></div></div>
+      <div class="set-row"><div><h4>目安の出典</h4>
+        <p>既定値は WHO と厚生労働省の身体活動基準（中強度の有酸素を週150分以上、筋力トレーニングを週2回以上）です。</p></div>
+        <div class="set-ctl"><button class="btn-ghost" data-s="goalReset">既定に戻す</button></div></div>
+
       <div class="set-sec-t">入力</div>
-      <div class="set-row"><div><h4>重量の増減幅</h4><p>＋−ボタンと ↑↓ キーで動く量です。</p></div>
+      <div class="set-row"><div><h4>重量の増減幅</h4><p>＋− ボタンで一度に動く量です。</p></div>
         <div class="set-ctl">${seg('wStep', [[1,'1kg'],[1.25,'1.25'],[2.5,'2.5kg'],[5,'5kg']], s.wStep)}</div></div>
 
       <div class="set-sec-t">外観</div>
@@ -1307,7 +1482,7 @@ function setHTML(){
         <div class="set-ctl"><button class="btn-ghost" data-s="export">書き出す</button></div></div>
       <div class="set-row"><div><h4>読み込み</h4><p>書き出した JSON を貼り付けて復元します。</p></div>
         <div class="set-ctl"><button class="btn-ghost" data-s="import">読み込む</button></div></div>
-      <div class="set-row"><div><h4>すべて削除</h4><p>取り消せません。先に書き出しておくことをおすすめします。</p></div>
+      <div class="set-row"><div><h4>全データの削除</h4><p>取り消せません。先に書き出しておくことを推奨します。</p></div>
         <div class="set-ctl"><button class="btn-text is-danger" data-s="wipe">全データを削除</button></div></div>
 
     </div>
@@ -1325,14 +1500,25 @@ $('#page-set').addEventListener('click', e => {
   if (k === 'auto' || k === 'sound'){ db.settings[k] = !db.settings[k]; save(); renderSet(); if (ui.page==='log') renderLog(); }
   else if (k === 'wStep'){ db.settings.wStep = parseFloat(b.dataset.v); save(); renderSet(); }
   else if (k === 'theme'){ db.settings.theme = b.dataset.v; save(); applyTheme(); renderSet(); }
+  else if (k === 'goalReset'){
+    db.settings.goalMin = WHO_MIN; db.settings.goalDays = WHO_DAYS; save(); renderSet();
+    toast('目標を既定（WHO・厚生労働省の目安）に戻しました');
+  }
   else if (k === 'export') sheetExport();
   else if (k === 'import') sheetImport();
   else if (k === 'wipe') sheetWipe();
 });
 $('#page-set').addEventListener('input', e => {
-  if (e.target.id === 'restIn'){
+  const id = e.target.id;
+  if (id === 'restIn'){
     const v = clamp(parseInt(e.target.value,10) || 0, 5, 900);
     db.settings.rest = v; save(); if (!T.run) tSet(v);
+  }
+  else if (id === 'goalMinIn'){
+    db.settings.goalMin = clamp(parseInt(e.target.value,10) || 0, 0, 2000); save();
+  }
+  else if (id === 'goalDaysIn'){
+    db.settings.goalDays = clamp(parseInt(e.target.value,10) || 0, 0, 7); save();
   }
 });
 
@@ -1379,7 +1565,7 @@ function sheetImport(){
     try{
       const o = JSON.parse($('#impTa').value);
       if (!o || !Array.isArray(o.sets)) throw 0;
-      db = { v:1, sets:o.sets, notes:o.notes || {},
+      db = { v:1, sets:o.sets, notes:o.notes || {}, mood:o.mood || {},
              settings:Object.assign({}, DEFAULT_SETTINGS, o.settings || {}) };
       localStorage.setItem(KEY, JSON.stringify(db));
       closeSheet(); applyTheme(); renderAll();
@@ -1389,15 +1575,15 @@ function sheetImport(){
 }
 
 function sheetWipe(){
-  openSheet(`<h3>すべてのデータを削除しますか</h3>
-    <p>${db.sets.length}件のセットと${Object.keys(db.notes).length}件のメモがすべて消えます。種目の履歴も同時に失われます。この操作は取り消せません。</p>
+  openSheet(`<h3>全データを削除しますか</h3>
+    <p>${db.sets.length}件のセット、${Object.keys(db.notes).length}件のメモ、${Object.keys(db.mood).length}件の体調がすべて消えます。種目の履歴も同時に失われます。この操作は取り消せません。</p>
     <div class="sheet-acts">
       <button class="btn-primary" id="noBtn">やめておく</button>
       <button class="btn-text is-danger" id="yesBtn">削除する</button>
     </div>`);
   $('#noBtn').onclick = closeSheet;
   $('#yesBtn').onclick = () => {
-    db = { v:1, sets:[], notes:{}, settings:Object.assign({}, DEFAULT_SETTINGS, db.settings) };
+    db = { v:1, sets:[], notes:{}, mood:{}, settings:Object.assign({}, DEFAULT_SETTINGS, db.settings) };
     localStorage.setItem(KEY, JSON.stringify(db));
     closeSheet(); renderAll(); toast('すべて削除しました');
   };
