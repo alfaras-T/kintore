@@ -276,11 +276,26 @@ function tTick(){
 }
 function mmss(s){ return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0'); }
 
+/* 音は AudioContext を1つ使い回す。
+   iOS/Safari はユーザー操作の中で作った context でないと鳴らないので、
+   最初のタップで先に開いておき、タイマー終了時はそれを再開して使う。 */
+let AC = null;
+function audioCtx(){
+  const A = window.AudioContext || window.webkitAudioContext;
+  if (!A) return null;
+  if (!AC){ try { AC = new A(); } catch(e){ return null; } }
+  if (AC.state === 'suspended') AC.resume().catch(() => {});
+  return AC;
+}
+document.addEventListener('pointerdown', () => audioCtx(), { once:true, passive:true });
+
 function ding(){
   if (!db.settings.sound) return;
+  beep();
+}
+function beep(){
+  const ac = audioCtx(); if (!ac) return;
   try{
-    const A = window.AudioContext || window.webkitAudioContext; if (!A) return;
-    const ac = new A();
     [0, .18, .36].forEach((t, i) => {
       const o = ac.createOscillator(), g = ac.createGain();
       o.type = 'sine'; o.frequency.value = i === 2 ? 1046 : 784;
@@ -290,7 +305,6 @@ function ding(){
       o.connect(g); g.connect(ac.destination);
       o.start(ac.currentTime + t); o.stop(ac.currentTime + t + .18);
     });
-    setTimeout(() => ac.close(), 900);
   }catch(e){}
 }
 
@@ -1460,8 +1474,12 @@ function setHTML(){
         <div class="set-ctl"><input class="num-sm n" id="restIn" value="${s.rest}" inputmode="numeric"><span class="unit">秒</span></div></div>
       <div class="set-row"><div><h4>記録したら自動で開始</h4><p>セットを記録した瞬間にカウントを始めます。</p></div>
         <div class="set-ctl"><button class="sw" data-s="auto" data-on="${s.auto?1:0}" aria-pressed="${s.auto}" aria-label="記録したら自動で開始"></button></div></div>
-      <div class="set-row"><div><h4>終了音とバイブ</h4><p>0秒になったら短く3回鳴らします。</p></div>
-        <div class="set-ctl"><button class="sw" data-s="sound" data-on="${s.sound?1:0}" aria-pressed="${s.sound}" aria-label="終了音とバイブ"></button></div></div>
+      <div class="set-row"><div><h4>終了音とバイブ</h4>
+        <p>0秒になったら短く3回鳴らします。端末がマナーモードだと鳴らないことがあります。</p></div>
+        <div class="set-ctl">
+          <button class="btn-ghost" data-s="testSound">音を試す</button>
+          <button class="sw" data-s="sound" data-on="${s.sound?1:0}" aria-pressed="${s.sound}" aria-label="終了音とバイブ"></button>
+        </div></div>
 
       <div class="set-sec-t">週の目標</div>
       <div class="set-row"><div><h4>有酸素の目標</h4><p>1週間の合計時間。0 にすると目標を表示しません。</p></div>
@@ -1506,6 +1524,10 @@ $('#page-set').addEventListener('click', e => {
   else if (k === 'goalReset'){
     db.settings.goalMin = WHO_MIN; db.settings.goalDays = WHO_DAYS; save(); renderSet();
     toast('目標を既定（WHO・厚生労働省の目安）に戻しました');
+  }
+  else if (k === 'testSound'){
+    beep();
+    if (!db.settings.sound) toast('いまは終了音がオフです。右のスイッチで有効にできます');
   }
   else if (k === 'export') sheetExport();
   else if (k === 'import') sheetImport();
